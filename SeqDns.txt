@@ -1,0 +1,96 @@
+# ===========================
+# CONFIG
+# ===========================
+$InputFile  = "pc_list.txt"      # One hostname per line
+$OutputFile = "DNS_Validation_Report.csv"
+$FailFile   = "AD_Action_Required.txt"
+$TimeoutMS  = 1000
+
+# ===========================
+# INIT OUTPUT
+# ===========================
+"Hostname,Forward_IP,Ping_Status,Reverse_Hostname,Status" | Out-File $OutputFile
+"Systems Requiring AD Action" | Out-File $FailFile
+
+$Targets = Get-Content $InputFile
+
+Write-Host "Starting AD DNS Cross Verification..." -ForegroundColor Cyan
+
+foreach ($Target in $Targets) {
+
+    Write-Host "Checking $Target ..."
+
+    $ForwardIP = "NA"
+    $PingStatus = "DOWN"
+    $ReverseHost = "NA"
+    $FinalStatus = "OK"
+
+    # ===========================
+    # FORWARD DNS
+    # ===========================
+    try {
+        $dns = [System.Net.Dns]::GetHostAddresses($Target) |
+               Where-Object { $_.AddressFamily -eq "InterNetwork" } |
+               Select-Object -First 1
+
+        if ($dns) {
+            $ForwardIP = $dns.IPAddressToString
+        }
+        else {
+            $FinalStatus = "NO_FORWARD_DNS"
+        }
+    }
+    catch {
+        $FinalStatus = "NO_FORWARD_DNS"
+    }
+
+    # ===========================
+    # PING TEST (IPv4)
+    # ===========================
+    if ($ForwardIP -ne "NA") {
+        try {
+            $ping = New-Object System.Net.NetworkInformation.Ping
+            $reply = $ping.Send($ForwardIP, $TimeoutMS)
+            if ($reply.Status -eq "Success") {
+                $PingStatus = "UP"
+            }
+            else {
+                $FinalStatus = "PING_FAILED"
+            }
+        }
+        catch {
+            $FinalStatus = "PING_FAILED"
+        }
+    }
+
+    # ===========================
+    # REVERSE DNS
+    # ===========================
+    if ($ForwardIP -ne "NA") {
+        try {
+            $rev = [System.Net.Dns]::GetHostEntry($ForwardIP)
+            $ReverseHost = $rev.HostName
+
+            if ($ReverseHost.ToLower() -notlike "*$($Target.ToLower())*") {
+                $FinalStatus = "FWD_REV_MISMATCH"
+            }
+        }
+        catch {
+            $FinalStatus = "NO_REVERSE_DNS"
+        }
+    }
+
+    # ===========================
+    # WRITE RESULT
+    # ===========================
+    "$Target,$ForwardIP,$PingStatus,$ReverseHost,$FinalStatus" | Add-Content $OutputFile
+
+    if ($FinalStatus -ne "OK") {
+        "$Target - $FinalStatus" | Add-Content $FailFile
+    }
+}
+
+Write-Host "====================================="
+Write-Host "Validation Completed" -ForegroundColor Green
+Write-Host "Report: $OutputFile"
+Write-Host "AD Action List: $FailFile"
