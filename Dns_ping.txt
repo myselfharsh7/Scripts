@@ -1,0 +1,180 @@
+# ======================================
+# CONFIG
+# ======================================
+$InputFile     = "pc_list.txt"
+$OutputFile    = "DNS_Validation_Report.csv"
+$FailFile      = "AD_Action_Required.txt"
+$ThrottleLimit = 80
+$TimeoutMS     = 1000
+
+# ======================================
+# INIT FILES
+# ======================================
+"Hostname,Forward_IP,Ping_Status,Reverse_Hostname,Status" | Out-File $OutputFile
+"Systems Requiring AD Action" | Out-File $FailFile
+
+$Targets = Get-Content $InputFile
+$Total   = $Targets.Count
+
+$RunspacePool = [runspacefactory]::CreateRunspacePool(1, $ThrottleLimit)
+$RunspacePool.Open()
+
+$Jobs = @()
+
+# Counters
+$OK = 0
+$Fail = 0
+$Mismatch = 0
+$NoDNS = 0
+$PingFail = 0
+
+Write-Host ""
+Write-Host "=============================================" -ForegroundColor Cyan
+Write-Host "     AD DNS PARALLEL VALIDATION STARTED     " -ForegroundColor Cyan
+Write-Host "=============================================" -ForegroundColor Cyan
+Write-Host "Total Systems: $Total"
+Write-Host ""
+
+# ======================================
+# CREATE RUNSPACES
+# ======================================
+foreach ($Target in $Targets) {
+
+    $PowerShell = [powershell]::Create()
+    $PowerShell.RunspacePool = $RunspacePool
+
+    $ScriptBlock = {
+        param($Target, $TimeoutMS)
+
+        $ForwardIP  = "NA"
+        $PingStatus = "DOWN"
+        $ReverseHost = "NA"
+        $FinalStatus = "OK"
+
+        try {
+            $dns = [System.Net.Dns]::GetHostAddresses($Target) |
+                   Where-Object { $_.AddressFamily -eq "InterNetwork" } |
+                   Select-Object -First 1
+            if ($dns) {
+                $ForwardIP = $dns.IPAddressToString
+            } else {
+                $FinalStatus = "NO_FORWARD_DNS"
+            }
+        } catch {
+            $FinalStatus = "NO_FORWARD_DNS"
+        }
+
+        if ($ForwardIP -ne "NA") {
+            try {
+                $ping = New-Object System.Net.NetworkInformation.Ping
+                $reply = $ping.Send($ForwardIP, $TimeoutMS)
+                if ($reply.Status -eq "Success") {
+                    $PingStatus = "UP"
+                } else {
+                    $FinalStatus = "PING_FAILED"
+                }
+            } catch {
+                $FinalStatus = "PING_FAILED"
+            }
+        }
+
+        if ($ForwardIP -ne "NA") {
+            try {
+                $rev = [System.Net.Dns]::GetHostEntry($ForwardIP)
+                $ReverseHost = $rev.HostName
+                if ($ReverseHost.ToLower() -notlike "*$($Target.ToLower())*") {
+                    $FinalStatus = "FWD_REV_MISMATCH"
+                }
+            } catch {
+                $FinalStatus = "NO_REVERSE_DNS"
+            }
+        }
+
+        return "$Target,$ForwardIP,$PingStatus,$ReverseHost,$FinalStatus"
+    }
+
+    $PowerShell.AddScript($ScriptBlock).AddArgument($Target).AddArgument($TimeoutMS) | Out-Null
+    $Handle = $PowerShell.BeginInvoke()
+
+    $Jobs += [PSCustomObject]@{
+        Pipe   = $PowerShell
+        Handle = $Handle
+    }
+}
+
+# ======================================
+# COLLECT RESULTS + DECORATED OUTPUT
+# ======================================
+$Processed = 0
+
+foreach ($Job in $Jobs) {
+
+    $Result = $Job.Pipe.EndInvoke($Job.Handle)
+    $Job.Pipe.Dispose()
+
+    Add-Content $OutputFile $Result
+
+    $Parts = $Result.Split(",")
+    $Host = $Parts[0]
+    $IP = $Parts[1]
+    $Ping = $Parts[2]
+    $Rev = $Parts[3]
+    $Status = $Parts[4]
+
+    $Processed++
+    $Percent = [math]::Round(($Processed / $Total) * 100, 2)
+
+    Write-Host "[$Processed/$Total] [$Percent%]" -NoNewline
+    Write-Host "  $Host  ->  " -NoNewline
+
+    switch ($Status) {
+        "OK" {
+            Write-Host "✔ OK  | IP: $IP | Ping: $Ping" -ForegroundColor Green
+            $OK++
+        }
+        "NO_FORWARD_DNS" {
+            Write-Host "✖ NO FORWARD DNS" -ForegroundColor Red
+            $NoDNS++
+            $Fail++
+        }
+        "NO_REVERSE_DNS" {
+            Write-Host "⚠ NO REVERSE DNS | IP: $IP" -ForegroundColor Yellow
+            $Fail++
+        }
+        "PING_FAILED" {
+            Write-Host "✖ PING FAILED | IP: $IP" -ForegroundColor Red
+            $PingFail++
+            $Fail++
+        }
+        "FWD_REV_MISMATCH" {
+            Write-Host "⚠ DNS MISMATCH | IP: $IP | PTR: $Rev" -ForegroundColor Magenta
+            $Mismatch++
+            $Fail++
+        }
+    }
+
+    if ($Status -ne "OK") {
+        "$Host - $Status" | Add-Content $FailFile
+    }
+}
+
+$RunspacePool.Close()
+$RunspacePool.Dispose()
+
+# ======================================
+# SUMMARY
+# ======================================
+Write-Host ""
+Write-Host "=============================================" -ForegroundColor Cyan
+Write-Host "               SUMMARY                       " -ForegroundColor Cyan
+Write-Host "=============================================" -ForegroundColor Cyan
+Write-Host "Total Checked : $Total"
+Write-Host "OK            : $OK" -ForegroundColor Green
+Write-Host "Failures      : $Fail" -ForegroundColor Red
+Write-Host "Ping Failed   : $PingFail" -ForegroundColor Red
+Write-Host "No DNS        : $NoDNS" -ForegroundColor Yellow
+Write-Host "Mismatch      : $Mismatch" -ForegroundColor Magenta
+Write-Host "=============================================" -ForegroundColor Cyan
+Write-Host "Report File   : $OutputFile"
+Write-Host "AD Action List: $FailFile"
+Write-Host "=============================================" -ForegroundColor Cyan

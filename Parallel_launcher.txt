@@ -1,0 +1,41 @@
+@echo off
+setlocal
+
+set INPUT=pc_list.txt
+set THREADS=5
+
+echo Splitting file into %THREADS% parts...
+
+:: Create temp folder
+if not exist temp mkdir temp
+
+:: Split file
+powershell -Command ^
+"$content = Get-Content '%INPUT%'; ^
+$parts = [math]::Ceiling($content.Count / %THREADS%); ^
+for ($i=0; $i -lt %THREADS%; $i++) { ^
+$start = $i * $parts; ^
+$end = [math]::Min(($start + $parts - 1), $content.Count - 1); ^
+$content[$start..$end] | Out-File ('temp\part' + $i + '.txt') }"
+
+echo Starting parallel CMD processes...
+
+for /L %%i in (0,1,%THREADS%-1) do (
+    start cmd /c worker_dns.bat temp\part%%i.txt %%i
+)
+
+echo.
+echo Waiting for all CMD windows to finish...
+pause
+
+echo Merging results...
+
+copy /b result_*.csv DNS_Validation_Final.csv >nul
+copy /b fail_*.txt AD_Action_Final.txt >nul
+
+echo ==========================================
+echo Parallel DNS Validation Completed
+echo Final CSV: DNS_Validation_Final.csv
+echo Final Fail List: AD_Action_Final.txt
+echo ==========================================
+pause

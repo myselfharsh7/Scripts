@@ -1,0 +1,57 @@
+@echo off
+setlocal EnableDelayedExpansion
+
+set INPUT=%1
+set OUTPUT=result_%2.csv
+set FAIL=fail_%2.txt
+
+echo Hostname,Forward_IP,Ping_Status,Reverse_Hostname,Status > %OUTPUT%
+echo Systems Requiring AD Action > %FAIL%
+
+for /f "usebackq delims=" %%A in ("%INPUT%") do (
+
+    set HOST=%%A
+    set IP=NA
+    set PING=DOWN
+    set REV=NA
+    set STATUS=OK
+
+    :: Forward DNS
+    for /f "tokens=2 delims=:" %%B in ('nslookup %%A ^| find "Address"') do (
+        set IP=%%B
+        set IP=!IP: =!
+    )
+
+    if "!IP!"=="NA" (
+        set STATUS=NO_FORWARD_DNS
+    )
+
+    :: Ping
+    if not "!IP!"=="NA" (
+        ping -4 -n 1 -w 1000 !IP! >nul
+        if !errorlevel! == 0 (
+            set PING=UP
+        ) else (
+            set STATUS=PING_FAILED
+        )
+    )
+
+    :: Reverse DNS
+    if not "!IP!"=="NA" (
+        for /f "tokens=2 delims=:" %%C in ('nslookup !IP! ^| find "Name"') do (
+            set REV=%%C
+            set REV=!REV: =!
+        )
+        if "!REV!"=="NA" (
+            set STATUS=NO_REVERSE_DNS
+        )
+    )
+
+    echo %%A,!IP!,!PING!,!REV!,!STATUS! >> %OUTPUT%
+
+    if not "!STATUS!"=="OK" (
+        echo %%A - !STATUS! >> %FAIL%
+    )
+)
+
+exit
